@@ -25,11 +25,23 @@ on:
         required: false
         default: 'all'
       argo_domain:
-        description: '固定 Argo 自定义域名 (如 argo.blibli.kdns.fr，留空则使用临时 Quick Tunnel)'
+        description: '固定 Argo 自定义域名 (如 unikraft-arog.blibli.kdns.fr)'
+        required: false
+        default: 'unikraft-arog.blibli.kdns.fr'
+      argo_token:
+        description: 'Cloudflare Tunnel Token'
+        required: false
+        default: 'eyJhIjoiOTE5NDQ4ZGZiOWY5MTJiZDhiMGM4MGEyOTgzMTdkYTgiLCJ0IjoiN2NhYjdlNDYtMjdkZS00MzE3LWI0MDQtYmVkNTE2ZGIxNmVlIiwicyI6Ik9UQXhOVGRrT1dFdE5XRXhZUzAwT0RnekxUZ3dNbUV0WkRnMFlXUTNNek14WTJRdyJ9'
+      nezha_server:
+        description: '哪吒服务端地址 (v1格式 nz.abc.com:8008, v0格式 nz.abc.com)'
         required: false
         default: ''
-      argo_token:
-        description: 'Cloudflare Tunnel Token (留空则使用临时 Quick Tunnel)'
+      nezha_port:
+        description: '哪吒端口 (v1版请留空, v0版填 5555 等)'
+        required: false
+        default: ''
+      nezha_key:
+        description: '哪吒通信密钥 (NZ_CLIENT_SECRET 或 Agent Secret)'
         required: false
         default: ''
       uuid:
@@ -41,7 +53,7 @@ on:
         required: false
         default: '512MiB'
       ukc_token:
-        description: 'Unikraft API Token (默认自动读取 daye 账号 Token)'
+        description: 'Unikraft API Token'
         required: false
         default: 'cm9ib3QkZGF5ZS51c2Vycy5rcmFmdGNsb3VkOjNqQTBqdU1oYk9KOEZVNWE4VnY2SDNYcHRPQTk2dWUz'
 
@@ -120,6 +132,7 @@ jobs:
           set -euo pipefail
           VERSION=$(curl -fsSL https://pkg.unikraft.com/endpoints/cli/content/stable.txt | tr -d '\r\n')
           VERSION="${VERSION#v}"
+          echo "Installing unikraft CLI v${VERSION}"
           curl -fsSL "https://github.com/unikraft-cloud/cli/releases/download/v${VERSION}/unikraft-cli_${VERSION}_linux_amd64.tar.gz" -o /tmp/unikraft.tar.gz
           tar -xzf /tmp/unikraft.tar.gz -C /tmp
           chmod +x /tmp/unikraft
@@ -141,11 +154,12 @@ jobs:
           TOKEN: ${{ github.event.inputs.ukc_token || secrets.UNIKRAFT_TOKEN || env.DEFAULT_TOKEN }}
           METRO: ${{ matrix.metro }}
           NODE_UUID: ${{ github.event.inputs.uuid || '694949f5-54c3-4113-b3c9-2d2518f770f4' }}
-          ARGO_DOMAIN: ${{ github.event.inputs.argo_domain || '' }}
-          ARGO_AUTH: ${{ github.event.inputs.argo_token || '' }}
+          ARGO_DOMAIN: ${{ github.event.inputs.argo_domain || 'unikraft-arog.blibli.kdns.fr' }}
+          ARGO_AUTH: ${{ github.event.inputs.argo_token || 'eyJhIjoiOTE5NDQ4ZGZiOWY5MTJiZDhiMGM4MGEyOTgzMTdkYTgiLCJ0IjoiN2NhYjdlNDYtMjdkZS00MzE3LWI0MDQtYmVkNTE2ZGIxNmVlIiwicyI6Ik9UQXhOVGRrT1dFdE5XRXhZUzAwT0RnekxUZ3dNbUV0WkRnMFlXUTNNek14WTJRdyJ9' }}
+          NEZHA_SERVER: ${{ github.event.inputs.nezha_server || secrets.NEZHA_SERVER || '' }}
+          NEZHA_PORT: ${{ github.event.inputs.nezha_port || secrets.NEZHA_PORT || '' }}
+          NEZHA_KEY: ${{ github.event.inputs.nezha_key || secrets.NEZHA_KEY || '' }}
           MEMORY: ${{ github.event.inputs.memory || '512MiB' }}
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
           set -euo pipefail
           INSTANCE_NAME="argo-${METRO}"
@@ -189,8 +203,17 @@ jobs:
           if [ -n "${ARGO_AUTH}" ]; then
             ENV_OPTS+=(--env "ARGO_AUTH=${ARGO_AUTH}")
           fi
+          if [ -n "${NEZHA_SERVER}" ]; then
+            ENV_OPTS+=(--env "NEZHA_SERVER=${NEZHA_SERVER}")
+          fi
+          if [ -n "${NEZHA_PORT}" ]; then
+            ENV_OPTS+=(--env "NEZHA_PORT=${NEZHA_PORT}")
+          fi
+          if [ -n "${NEZHA_KEY}" ]; then
+            ENV_OPTS+=(--env "NEZHA_KEY=${NEZHA_KEY}")
+          fi
           
-          # 启动实例 (保持常开，避免 Argo 隧道离线)
+          # 启动实例
           unikraft run \
             --name "${INSTANCE_NAME}" \
             --metro "${METRO}" \
@@ -237,5 +260,4 @@ jobs:
           
           echo "### 部署就绪 (${METRO})" >> $GITHUB_STEP_SUMMARY
           echo "- **区域**: \`${METRO}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Web 订阅与服务地址**: https://${FQDN}" >> $GITHUB_STEP_SUMMARY
           echo "- **节点订阅直链**: https://${FQDN}/sub" >> $GITHUB_STEP_SUMMARY
