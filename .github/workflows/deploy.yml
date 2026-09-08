@@ -1,0 +1,241 @@
+name: unikraft-argo-deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'Dockerfile'
+      - 'Kraftfile'
+      - 'index.js'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+    inputs:
+      action:
+        description: '操作类型'
+        required: true
+        default: 'deploy'
+        type: choice
+        options:
+          - deploy
+          - cleanup
+          - build-only
+      metro:
+        description: '部署区域（all 部署全部5节点，或输入单个：fra/was/dal/sin/sfo）'
+        required: false
+        default: 'all'
+      argo_domain:
+        description: '固定 Argo 自定义域名 (如 argo.blibli.kdns.fr，留空则使用临时 Quick Tunnel)'
+        required: false
+        default: ''
+      argo_token:
+        description: 'Cloudflare Tunnel Token (留空则使用临时 Quick Tunnel)'
+        required: false
+        default: ''
+      uuid:
+        description: 'VMess / VLESS / Trojan 节点 UUID'
+        required: false
+        default: '694949f5-54c3-4113-b3c9-2d2518f770f4'
+      memory:
+        description: '实例内存配额 (推荐 512MiB 或 1GiB)'
+        required: false
+        default: '512MiB'
+      ukc_token:
+        description: 'Unikraft API Token (默认自动读取 daye 账号 Token)'
+        required: false
+        default: 'cm9ib3QkZGF5ZS51c2Vycy5rcmFmdGNsb3VkOjNqQTBqdU1oYk9KOEZVNWE4VnY2SDNYcHRPQTk2dWUz'
+
+permissions:
+  contents: write
+
+env:
+  UKC_ORG: daye
+  IMAGE_NAME: daye/unikraft-argo:latest
+  DEFAULT_TOKEN: 'cm9ib3QkZGF5ZS51c2Vycy5rcmFmdGNsb3VkOjNqQTBqdU1oYk9KOEZVNWE4VnY2SDNYcHRPQTk2dWUz'
+
+jobs:
+  build-image:
+    if: github.event_name == 'push' || github.event.inputs.action != 'cleanup'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Unikraft CLI
+        run: |
+          set -euo pipefail
+          VERSION=$(curl -fsSL https://pkg.unikraft.com/endpoints/cli/content/stable.txt | tr -d '\r\n')
+          VERSION="${VERSION#v}"
+          echo "Installing unikraft CLI v${VERSION}"
+          curl -fsSL "https://github.com/unikraft-cloud/cli/releases/download/v${VERSION}/unikraft-cli_${VERSION}_linux_amd64.tar.gz" -o /tmp/unikraft.tar.gz
+          tar -xzf /tmp/unikraft.tar.gz -C /tmp
+          chmod +x /tmp/unikraft
+          echo "/tmp" >> $GITHUB_PATH
+
+      - name: Login to Unikraft Cloud
+        env:
+          TOKEN: ${{ github.event.inputs.ukc_token || secrets.UNIKRAFT_TOKEN || env.DEFAULT_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "${TOKEN}" > /tmp/ukc_token.txt
+          unikraft login --token /tmp/ukc_token.txt --organization "${UKC_ORG}"
+
+      - name: Build & Push Unikraft Argo Image
+        run: |
+          set -euo pipefail
+          echo "=== 构建 Unikraft Argo 微内核镜像 ==="
+          unikraft image build . --output /tmp/argo.tar
+          
+          echo "=== 推送镜像至 Unikraft Cloud Registry ==="
+          unikraft image copy /tmp/argo.tar "unikraft.io/${IMAGE_NAME}"
+          echo "=== 镜像构建并推送完成 ==="
+
+  deploy:
+    needs: [build-image]
+    if: |
+      always() &&
+      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped') &&
+      github.event.inputs.action != 'cleanup' &&
+      github.event.inputs.action != 'build-only'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        metro: [fra, was, dal, sin, sfo]
+    steps:
+      - name: Filter Metro
+        id: filter
+        run: |
+          TARGET="${{ github.event.inputs.metro || 'all' }}"
+          CURRENT="${{ matrix.metro }}"
+          if [ "${TARGET}" != "all" ] && [ -n "${TARGET}" ] && [ "${TARGET}" != "${CURRENT}" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install Unikraft CLI
+        if: steps.filter.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          VERSION=$(curl -fsSL https://pkg.unikraft.com/endpoints/cli/content/stable.txt | tr -d '\r\n')
+          VERSION="${VERSION#v}"
+          curl -fsSL "https://github.com/unikraft-cloud/cli/releases/download/v${VERSION}/unikraft-cli_${VERSION}_linux_amd64.tar.gz" -o /tmp/unikraft.tar.gz
+          tar -xzf /tmp/unikraft.tar.gz -C /tmp
+          chmod +x /tmp/unikraft
+          echo "/tmp" >> $GITHUB_PATH
+
+      - name: Login to Unikraft
+        if: steps.filter.outputs.skip == 'false'
+        env:
+          TOKEN: ${{ github.event.inputs.ukc_token || secrets.UNIKRAFT_TOKEN || env.DEFAULT_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "${TOKEN}" > /tmp/ukc_token.txt
+          unikraft login --token /tmp/ukc_token.txt --organization "${UKC_ORG}"
+
+      - name: Deploy to ${{ matrix.metro }}
+        if: steps.filter.outputs.skip == 'false'
+        id: deploy
+        env:
+          TOKEN: ${{ github.event.inputs.ukc_token || secrets.UNIKRAFT_TOKEN || env.DEFAULT_TOKEN }}
+          METRO: ${{ matrix.metro }}
+          NODE_UUID: ${{ github.event.inputs.uuid || '694949f5-54c3-4113-b3c9-2d2518f770f4' }}
+          ARGO_DOMAIN: ${{ github.event.inputs.argo_domain || '' }}
+          ARGO_AUTH: ${{ github.event.inputs.argo_token || '' }}
+          MEMORY: ${{ github.event.inputs.memory || '512MiB' }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: |
+          set -euo pipefail
+          INSTANCE_NAME="argo-${METRO}"
+          FULL_IMAGE="oci://unikraft.io/${IMAGE_NAME}"
+          
+          echo "==> 部署到 ${METRO}..."
+          echo "    实例名: ${INSTANCE_NAME}"
+          echo "    镜像: ${FULL_IMAGE}"
+          echo "    内存: ${MEMORY}"
+          
+          # 清理同名旧实例
+          python3 -c "
+          import urllib.request, json
+          headers = {'Authorization': 'Bearer ${TOKEN}', 'Content-Type': 'application/json'}
+          try:
+              req = urllib.request.Request('https://api.${METRO}.unikraft.cloud/v1/instances', headers=headers)
+              with urllib.request.urlopen(req) as resp:
+                  data = json.loads(resp.read().decode('utf-8'))
+              for inst in data.get('data', {}).get('instances', []):
+                  if inst.get('name') == '${INSTANCE_NAME}':
+                      del_req = urllib.request.Request(f'https://api.${METRO}.unikraft.cloud/v1/instances/{inst[\"uuid\"]}', headers=headers, method='DELETE')
+                      urllib.request.urlopen(del_req)
+                      print(f'已清理旧实例: {inst[\"uuid\"]}')
+          except Exception as e:
+              print(f'清理提示: {e}')
+          "
+          
+          sleep 2
+          
+          # 构建环境变量参数
+          ENV_OPTS=()
+          ENV_OPTS+=(--env "UUID=${NODE_UUID}")
+          ENV_OPTS+=(--env "SERVER_PORT=3000")
+          ENV_OPTS+=(--env "PORT=3000")
+          ENV_OPTS+=(--env "NAME=UKC-${METRO}")
+          ENV_OPTS+=(--env "SHOW_LOG=true")
+          
+          if [ -n "${ARGO_DOMAIN}" ]; then
+            ENV_OPTS+=(--env "ARGO_DOMAIN=${ARGO_DOMAIN}")
+          fi
+          if [ -n "${ARGO_AUTH}" ]; then
+            ENV_OPTS+=(--env "ARGO_AUTH=${ARGO_AUTH}")
+          fi
+          
+          # 启动实例 (保持常开，避免 Argo 隧道离线)
+          unikraft run \
+            --name "${INSTANCE_NAME}" \
+            --metro "${METRO}" \
+            --image "${FULL_IMAGE}" \
+            --memory "${MEMORY}" \
+            --vcpus 1 \
+            -p 443:3000/http+tls \
+            -p 80:3000/http \
+            "${ENV_OPTS[@]}" \
+            -o json || true
+            
+          sleep 6
+          
+          # 查询实例域名
+          FQDN=$(python3 -c "
+          import urllib.request, json
+          headers = {'Authorization': 'Bearer ${TOKEN}'}
+          try:
+              req = urllib.request.Request('https://api.${METRO}.unikraft.cloud/v1/instances', headers=headers)
+              with urllib.request.urlopen(req) as resp:
+                  data = json.loads(resp.read().decode('utf-8'))
+              for inst in data.get('data', {}).get('instances', []):
+                  if inst.get('name') == '${INSTANCE_NAME}':
+                      sg_uuid = inst.get('service_group', {}).get('uuid', '')
+                      sg_req = urllib.request.Request(f'https://api.${METRO}.unikraft.cloud/v1/services/{sg_uuid}', headers=headers)
+                      with urllib.request.urlopen(sg_req) as sg_resp:
+                          sg_data = json.loads(sg_resp.read().decode('utf-8'))
+                      fqdn = sg_data.get('data', {}).get('service_groups', [{}])[0].get('domains', [{}])[0].get('fqdn', '')
+                      print(fqdn)
+                      break
+          except Exception as e:
+              print('')
+          ")
+          
+          echo "实例官方域名: https://${FQDN}"
+          echo "fqdn=${FQDN}" >> $GITHUB_OUTPUT
+          echo "metro=${METRO}" >> $GITHUB_OUTPUT
+
+      - name: 汇总报告
+        if: steps.filter.outputs.skip == 'false'
+        run: |
+          METRO="${{ steps.deploy.outputs.metro }}"
+          FQDN="${{ steps.deploy.outputs.fqdn }}"
+          
+          echo "### 部署就绪 (${METRO})" >> $GITHUB_STEP_SUMMARY
+          echo "- **区域**: \`${METRO}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Web 订阅与服务地址**: https://${FQDN}" >> $GITHUB_STEP_SUMMARY
+          echo "- **节点订阅直链**: https://${FQDN}/sub" >> $GITHUB_STEP_SUMMARY
