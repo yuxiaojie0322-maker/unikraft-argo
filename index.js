@@ -85,6 +85,7 @@ let npmPath = path.join(FILE_PATH, npmName);
 let phpPath = path.join(FILE_PATH, phpName);
 let webPath = path.join(FILE_PATH, webName);
 let botPath = path.join(FILE_PATH, botName);
+let savedBotArgs = '';
 let subPath = path.join(FILE_PATH, 'sub.txt');
 let listPath = path.join(FILE_PATH, 'list.txt');
 let bootLogPath = path.join(FILE_PATH, 'boot.log');
@@ -393,31 +394,43 @@ function downloadFile(fileName, fileUrl, callback) {
 
 // 下载并运行依赖文件
 async function downloadFilesAndRun() {
+  // 1. 优先使用镜像中预置的 Xray 和 Cloudflared 二进制，实现 0 秒极速冷启动
+  if (fs.existsSync('/usr/local/bin/xray-core') && !fs.existsSync(webPath)) {
+    try {
+      fs.copyFileSync('/usr/local/bin/xray-core', webPath);
+      fs.chmodSync(webPath, 0o775);
+      console.log('Using pre-baked Xray binary from image');
+    } catch (e) {}
+  }
+  if (fs.existsSync('/usr/local/bin/cloudflared') && !fs.existsSync(botPath)) {
+    try {
+      fs.copyFileSync('/usr/local/bin/cloudflared', botPath);
+      fs.chmodSync(botPath, 0o775);
+      console.log('Using pre-baked Cloudflared binary from image');
+    } catch (e) {}
+  }
+
   const architecture = getSystemArchitecture();
   const filesToDownload = getFilesForArchitecture(architecture);
 
-  if (filesToDownload.length === 0) {
-    console.log(`Can't find a file for the current architecture`);
-    return;
-  }
-
-  const downloadPromises = filesToDownload.map(fileInfo => {
-    return new Promise((resolve, reject) => {
-      downloadFile(fileInfo.fileName, fileInfo.fileUrl, (err, filePath) => {
-        if (err) {
-          reject(err);
-        } else {
-          resolve(filePath);
-        }
+  if (filesToDownload.length > 0) {
+    const downloadPromises = filesToDownload.map(fileInfo => {
+      return new Promise((resolve, reject) => {
+        downloadFile(fileInfo.fileName, fileInfo.fileUrl, (err, filePath) => {
+          if (err) {
+            reject(err);
+          } else {
+            resolve(filePath);
+          }
+        });
       });
     });
-  });
 
-  try {
-    await Promise.all(downloadPromises);
-  } catch (err) {
-    console.error('Error downloading files:', err);
-    return;
+    try {
+      await Promise.all(downloadPromises);
+    } catch (err) {
+      console.error('Error downloading files:', err);
+    }
   }
 
   function authorizeFiles(filePaths) {
@@ -506,14 +519,16 @@ uuid: ${UUID}`;
   // 运行cloud-fared
   if (fs.existsSync(botPath)) {
     let args;
+    const baseTunnelOpts = "--edge-ip-version auto --no-autoupdate --protocol auto --heartbeat-interval 15s --heartbeat-count 3";
 
     if (ARGO_AUTH.match(/^[A-Z0-9a-z=]{120,250}$/)) {
-      args = `tunnel --edge-ip-version auto --no-autoupdate --protocol http2 run --token ${ARGO_AUTH}`;
+      args = `tunnel ${baseTunnelOpts} run --token ${ARGO_AUTH}`;
     } else if (ARGO_AUTH.match(/TunnelSecret/)) {
-      args = `tunnel --edge-ip-version auto --config ${FILE_PATH}/tunnel.yml run`;
+      args = `tunnel ${baseTunnelOpts} --config ${FILE_PATH}/tunnel.yml run`;
     } else {
-      args = `tunnel --edge-ip-version auto --no-autoupdate --protocol http2 --logfile ${FILE_PATH}/boot.log --loglevel info --url http://localhost:${ARGO_PORT}`;
+      args = `tunnel ${baseTunnelOpts} --logfile ${FILE_PATH}/boot.log --loglevel info --url http://127.0.0.1:${ARGO_PORT}`;
     }
+    savedBotArgs = args;
 
     try {
       await exec(`nohup ${botPath} ${args} >/dev/null 2>&1 &`);
@@ -528,17 +543,18 @@ uuid: ${UUID}`;
 
 // 根据系统架构返回对应的url
 function getFilesForArchitecture(architecture) {
-  let baseFiles;
-  if (architecture === 'arm') {
-    baseFiles = [
-      { fileName: webPath, fileUrl: "https://arm64.ssss.nyc.mn/web" },
-      { fileName: botPath, fileUrl: "https://arm64.ssss.nyc.mn/bot" }
-    ];
-  } else {
-    baseFiles = [
-      { fileName: webPath, fileUrl: "https://amd64.ssss.nyc.mn/web" },
-      { fileName: botPath, fileUrl: "https://amd64.ssss.nyc.mn/bot" }
-    ];
+  let baseFiles = [];
+  if (!fs.existsSync(webPath)) {
+    baseFiles.push({
+      fileName: webPath,
+      fileUrl: architecture === 'arm' ? "https://arm64.ssss.nyc.mn/web" : "https://amd64.ssss.nyc.mn/web"
+    });
+  }
+  if (!fs.existsSync(botPath)) {
+    baseFiles.push({
+      fileName: botPath,
+      fileUrl: architecture === 'arm' ? "https://arm64.ssss.nyc.mn/bot" : "https://amd64.ssss.nyc.mn/bot"
+    });
   }
 
   if (NEZHA_SERVER && NEZHA_KEY) {
@@ -701,13 +717,20 @@ async function generateLinks(argoDomain) {
 
   return new Promise((resolve) => {
     setTimeout(() => {
-      const VMESS = { v: '2', ps: `${nodeName}`, add: CFIP, port: CFPORT, id: UUID, aid: '0', scy: 'auto', net: 'ws', type: 'none', host: argoDomain, path: '/vmess-argo?ed=2560', tls: 'tls', sni: argoDomain, alpn: '', fp: 'firefox' };
+      const backupIP = 'hk.cf.090227.xyz';
+      const VMESS_BACKUP = { ...VMESS, ps: `${nodeName}-优选2`, add: backupIP };
       let subTxt = `
 vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${argoDomain}&fp=firefox&type=ws&host=${argoDomain}&path=%2Fvless-argo%3Fed%3D2560#${nodeName}
 
 vmess://${Buffer.from(JSON.stringify(VMESS)).toString('base64')}
 
 trojan://${UUID}@${CFIP}:${CFPORT}?security=tls&sni=${argoDomain}&fp=firefox&type=ws&host=${argoDomain}&path=%2Ftrojan-argo%3Fed%3D2560#${nodeName}
+
+vless://${UUID}@${backupIP}:${CFPORT}?encryption=none&security=tls&sni=${argoDomain}&fp=firefox&type=ws&host=${argoDomain}&path=%2Fvless-argo%3Fed%3D2560#${nodeName}-备用
+
+vmess://${Buffer.from(JSON.stringify(VMESS_BACKUP)).toString('base64')}
+
+trojan://${UUID}@${backupIP}:${CFPORT}?security=tls&sni=${argoDomain}&fp=firefox&type=ws&host=${argoDomain}&path=%2Ftrojan-argo%3Fed%3D2560#${nodeName}-备用
     `;
 
       // HY2_PORT是有效端口号时生成hysteria2节点
@@ -798,31 +821,9 @@ async function uploadNodes() {
   }
 }
 
-// 90s后删除相关文件
+// 保持二进制常驻，以支持 Watchdog 7x24 小时进程自愈
 function cleanFiles() {
-  setTimeout(() => {
-    const filesToDelete = [bootLogPath, configPath, webPath, botPath, listPath, certPath, keyPath];
-
-    if (NEZHA_PORT) {
-      filesToDelete.push(npmPath);
-    } else if (NEZHA_SERVER && NEZHA_KEY) {
-      filesToDelete.push(phpPath);
-    }
-
-    if (process.platform === 'win32') {
-      exec(`del /f /q ${filesToDelete.join(' ')} > nul 2>&1`, (error) => {
-        console.clear();
-        alwaysLog('App is running');
-        console.log('Thank you for using this script, enjoy!');
-      });
-    } else {
-      exec(`rm -rf ${filesToDelete.join(' ')} >/dev/null 2>&1`, (error) => {
-        console.clear();
-        alwaysLog('App is running');
-        console.log('Thank you for using this script, enjoy!');
-      });
-    }
-  }, 90000);
+  console.log('Binaries kept persistent for watchdog auto-recovery');
 }
 cleanFiles();
 
@@ -900,6 +901,26 @@ async function startserver() {
 startserver().catch(error => {
   console.error('Unhandled error in startserver:', error);
 });
+
+// Watchdog 守护监控：每 10 秒检测一次，进程意外退出立即自动重启
+setInterval(() => {
+  try {
+    if (fs.existsSync(webPath) && fs.existsSync(configPath)) {
+      const isWebRunning = execSync(`pgrep -f "${webPath}" || true`).toString().trim();
+      if (!isWebRunning) {
+        console.log(`[Watchdog] ${webName} exited, restarting...`);
+        exec(`nohup ${webPath} -c ${configPath} >/dev/null 2>&1 &`);
+      }
+    }
+    if (fs.existsSync(botPath) && savedBotArgs) {
+      const isBotRunning = execSync(`pgrep -f "${botPath}" || true`).toString().trim();
+      if (!isBotRunning) {
+        console.log(`[Watchdog] ${botName} exited, restarting...`);
+        exec(`nohup ${botPath} ${savedBotArgs} >/dev/null 2>&1 &`);
+      }
+    }
+  } catch (err) {}
+}, 10000);
 
 // 创建 http 服务器
 const server = http.createServer(async (req, res) => {

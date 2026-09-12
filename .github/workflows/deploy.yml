@@ -196,6 +196,7 @@ jobs:
           ENV_OPTS+=(--env "PORT=3000")
           ENV_OPTS+=(--env "NAME=UKC-${METRO}")
           ENV_OPTS+=(--env "SHOW_LOG=true")
+          ENV_OPTS+=(--env "NODE_OPTIONS=--max-old-space-size=128")
           
           if [ -n "${ARGO_DOMAIN}" ]; then
             ENV_OPTS+=(--env "ARGO_DOMAIN=${ARGO_DOMAIN}")
