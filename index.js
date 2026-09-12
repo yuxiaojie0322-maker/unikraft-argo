@@ -717,6 +717,7 @@ async function generateLinks(argoDomain) {
 
   return new Promise((resolve) => {
     setTimeout(() => {
+      const VMESS = { v: '2', ps: `${nodeName}`, add: CFIP, port: CFPORT, id: UUID, aid: '0', scy: 'auto', net: 'ws', type: 'none', host: argoDomain, path: '/vmess-argo?ed=2560', tls: 'tls', sni: argoDomain, alpn: '', fp: 'firefox' };
       const backupIP = 'hk.cf.090227.xyz';
       const VMESS_BACKUP = { ...VMESS, ps: `${nodeName}-优选2`, add: backupIP };
       let subTxt = `
